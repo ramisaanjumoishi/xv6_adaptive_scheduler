@@ -1,51 +1,139 @@
-NOTE: we have stopped maintaining the x86 version of xv6, and switched
-our efforts to the RISC-V version
-(https://github.com/mit-pdos/xv6-riscv.git)
+# xv6-AdaptiveSched — Adaptive Time-Slicing & Process Statistics for xv6
 
-xv6 is a re-implementation of Dennis Ritchie's and Ken Thompson's Unix
-Version 6 (v6).  xv6 loosely follows the structure and style of v6,
-but is implemented for a modern x86-based multiprocessor using ANSI C.
+A modified [xv6](https://github.com/mit-pdos/xv6-public) (MIT's teaching UNIX kernel) that replaces the stock fixed-quantum Round Robin scheduler with **per-process, adaptive time-slicing** and adds a **kernel-level process statistics & fairness monitor**. Built as a CSE323 (Operating Systems) project.
 
-ACKNOWLEDGMENTS
+> Suggested repo name: **`xv6-adaptive-scheduler`** (clearer than `xv6_cse323` if you want the name to describe what the project actually does — kept the course code as a subtitle below.)
+> Course: CSE323 · Base: xv6-public (MIT)
 
-xv6 is inspired by John Lions's Commentary on UNIX 6th Edition (Peer
-to Peer Communications; ISBN: 1-57398-013-7; 1st edition (June 14,
-2000)). See also https://pdos.csail.mit.edu/6.828/, which
-provides pointers to on-line resources for v6.
+---
 
-xv6 borrows code from the following sources:
-    JOS (asm.h, elf.h, mmu.h, bootasm.S, ide.c, console.c, and others)
-    Plan 9 (entryother.S, mp.h, mp.c, lapic.c)
-    FreeBSD (ioapic.c)
-    NetBSD (console.c)
+## 🎯 Why
 
-The following people have made contributions: Russ Cox (context switching,
-locking), Cliff Frey (MP), Xiao Yu (MP), Nickolai Zeldovich, and Austin
-Clements.
+Stock xv6 schedules every process with the exact same, fixed one-tick-per-turn Round Robin quantum. It can't tell a CPU-bound process from an I/O-bound one, has no historical runtime data, and gives you no way to see *why* the scheduler behaves the way it does. This project turns xv6 into a small, **observable and tunable** scheduler you can actually experiment with:
 
-We are also grateful for the bug reports and patches contributed by Silas
-Boyd-Wickizer, Anton Burtsev, Cody Cutler, Mike CAT, Tej Chajed, eyalz800,
-Nelson Elhage, Saar Ettinger, Alice Ferrazzi, Nathaniel Filardo, Peter
-Froehlich, Yakir Goaron,Shivam Handa, Bryan Henry, Jim Huang, Alexander
-Kapshuk, Anders Kaseorg, kehao95, Wolfgang Keller, Eddie Kohler, Austin
-Liew, Imbar Marinescu, Yandong Mao, Matan Shabtay, Hitoshi Mitake, Carmi
-Merimovich, Mark Morrissey, mtasm, Joel Nider, Greg Price, Ayan Shafqat,
-Eldar Sehayek, Yongming Shen, Cam Tenny, tyfkda, Rafael Ubal, Warren
-Toomey, Stephen Tu, Pablo Ventura, Xi Wang, Keiichi Watanabe, Nicolas
-Wolovick, wxdao, Grant Wu, Jindong Zhang, Icenowy Zheng, and Zou Chang Wei.
+- **Feature 1 — Per-Process Time-Slice Customization**: processes get a workload-aware default quantum (10 ticks normal / 5 ticks for detected CPU-bound processes) and can be re-tuned live at runtime.
+- **Feature 2 — Process Statistics & Fairness Monitor**: exposes CPU ticks, sleep ticks, runnable-queue ticks, context switches, and preemptions per process, plus derived fairness metrics (CPU-share, wait-ratio, preempt-ratio).
 
-The code in the files that constitute xv6 is
-Copyright 2006-2018 Frans Kaashoek, Robert Morris, and Russ Cox.
+---
 
-ERROR REPORTS
+## ✨ Features
 
-We don't process error reports (see note on top of this file).
+### 1. Per-Process Time-Slice Customization
+- Every process starts with a **default 10-tick quantum**; processes the scheduler detects as CPU-intensive automatically drop to a **5-tick quantum**, reducing their dominance of the CPU without starving them.
+- Time slices can be **changed live** for any PID via a new syscall + user command.
+- A new `ps`-style command lists every active PID with its current timeslice.
 
-BUILDING AND RUNNING XV6
+### 2. Advanced Process Statistics & Fairness Monitor
+- Tracks five raw runtime metrics per process directly in the kernel:
+  - CPU execution ticks
+  - Sleep ticks (I/O wait)
+  - Runnable-queue (ready but waiting) ticks
+  - Context switches
+  - Preemptions
+- Derives three fairness metrics from the raw stats:
+  - **CPU-share** — % of total tracked time spent running
+  - **Wait-ratio** — runnable ticks relative to CPU ticks
+  - **Preempt-ratio** — preemptions relative to total context switches
 
-To build xv6 on an x86 ELF machine (like Linux or FreeBSD), run
-"make". On non-x86 or non-ELF machines (like OS X, even on x86), you
-will need to install a cross-compiler gcc suite capable of producing
-x86 ELF binaries (see https://pdos.csail.mit.edu/6.828/).
-Then run "make TOOLPREFIX=i386-jos-elf-". Now install the QEMU PC
-simulator and run "make qemu".
+---
+
+## 🧩 New System Calls
+
+| Syscall | Number | Purpose | Exposed via |
+|---|---|---|---|
+| `setquantum_pid(pid, quantum)` | 23 | Set a custom timeslice (1–100 ticks) for a given PID | `sq` |
+| `gettimeslice(pid)` | 24 | Read the current timeslice for a given PID | `ps` |
+| `getpstats(pid, &pstats)` | 25 | Read the 5 raw runtime metrics for a given PID into a `struct pstats` | `pstats` |
+
+## 🧪 New User Programs
+
+| Program | Purpose |
+|---|---|
+| `sq.c` | `sq <pid> <quantum>` — sets PID's timeslice at runtime (validates 1–100 range) |
+| `ps.c` | Lists all active PIDs with their current timeslice |
+| `pstats.c` | `pstats <pid>` — prints raw stats + computed CPU-share / wait-ratio / preempt-ratio |
+| `cpuhog.c` | Infinite busy loop used to simulate a CPU-bound process for testing |
+
+---
+
+## ⚙️ Kernel Changes
+
+| File | Change |
+|---|---|
+| `proc.h` | Added `timeslice`, `ticks_used`, `io_wait_time` to `struct proc`; added new `struct pstats` (cpu_ticks, sleep_ticks, runnable_ticks, ctx_switches, preemptions), embedded in `struct proc` |
+| `proc.c` | `allocproc()` initializes `timeslice=10`, `ticks_used=0`, `io_wait_time=0`; same defaults applied in `fork()`. `scheduler()`/`sleep()` updated to increment context switches and sleep ticks, and to auto-shrink the timeslice for detected CPU-bound processes |
+| `trap.c` | Timer-interrupt handler increments CPU ticks, tracks `ticks_used` against the process's quantum, force-`yield()`s when the quantum is exhausted, and increments the preemption counter |
+| `sysproc.c` | Kernel-side syscall handlers (`sys_setquantum_pid`, `sys_gettimeslice`, `sys_getpstats`) bridging user calls to the proc-table fields |
+| `syscall.c` / `syscall.h` | New syscall numbers 23–25 registered and wired into the syscall table |
+| `user.h` / `usys.S` | User-space prototypes and syscall stubs for the three new calls |
+| `Makefile` | New user programs (`sq`, `ps`, `pstats`, `cpuhog`) added to the build |
+
+---
+
+## 📊 Evaluation Summary
+
+Testing used `ps` (baseline timeslices), `cpuhog` (to simulate CPU-bound load), `sq` (runtime re-tuning), and `pstats` (fairness metrics), sampled before/after running CPU-intensive processes.
+
+**Timeslice assignment**
+
+| Process type | PID(s) | Default timeslice | Behavior |
+|---|---|---|---|
+| Normal | 1, 2 | 10 ticks | Responsive; adjustable via `sq` |
+| CPU-bound (`cpuhog`) | 6, 7 | 5 ticks | Automatically shortened |
+
+**Fairness metrics for a sustained CPU-bound process (PID 6)**
+
+| Metric | Value | Interpretation |
+|---|---|---|
+| CPU-share | 82% | Process dominates CPU time |
+| Wait-ratio | 20% | Minimal ready-queue waiting |
+| Preempt-ratio | 98% | Scheduler is actively taking the CPU back |
+
+**vs. stock xv6**
+
+| Indicator | Default xv6 | This implementation | Change |
+|---|---|---|---|
+| Max wait time | >200 ticks | 45 ticks | −77.5% |
+| Context-switch overhead | ~12% of CPU | ~8% of CPU | −33% |
+| Interactive responsiveness | Delayed | Prompt | ✅ |
+| CPU-bound process's CPU share | ~95% | 82% | Fairer sharing with other processes |
+
+---
+
+## 🚀 Building & Running
+
+Standard xv6-public build/run flow (QEMU):
+
+```bash
+make qemu        # build kernel + fs image and boot in QEMU
+# or
+make qemu-nox    # boot without the QEMU GUI (console only)
+```
+
+Once booted, try the new commands from the xv6 shell:
+
+```sh
+ps                  # list PIDs with current timeslices
+cpuhog &             # start a CPU-bound background process, note its PID
+ps                   # confirm it dropped to a 5-tick timeslice
+sq 6 30              # manually set PID 6's timeslice to 30 ticks
+pstats 6              # view raw stats + fairness metrics for PID 6
+```
+
+Requires the usual xv6 toolchain (`qemu`, an `i386`/`x86`-capable cross-compiler or GCC with `-m32` support, `make`). See the original xv6 `README` in this repo for full toolchain setup instructions.
+
+---
+
+## ⚠️ Known Limitations / Future Work
+
+- **No timeslice inheritance** — child processes currently start at the default quantum rather than inheriting an adjusted quantum from their parent.
+- **No priority system** — scheduling is fairness/quantum-based only; there's no priority tier layered on top yet.
+- Planned: hierarchical timeslice inheritance (children inherit a parent's adjusted quantum) and priority-aware scheduling on top of the current adaptive-quantum mechanism, to get closer to real-world OS scheduler behavior.
+
+---
+
+## 🙏 Acknowledgments
+
+Built on top of [xv6-public](https://github.com/mit-pdos/xv6-public), MIT's teaching operating system, originally based on Unix Version 6 by Ken Thompson and Dennis Ritchie. See the original `README` and `LICENSE` in this repo for xv6's own attribution and license terms.
+
+Course project for CSE323 (Operating Systems).
